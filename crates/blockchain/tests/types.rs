@@ -1,18 +1,31 @@
-use ethlambda_types::primitives::{BitList, H256, VariableList};
-use ethlambda_types::state::{State, ValidatorPubkeyBytes};
+use ethlambda_types::{
+    attestation::{
+        AggregatedAttestation as DomainAggregatedAttestation,
+        AggregationBits as DomainAggregationBits, Attestation as DomainAttestation,
+        AttestationData as DomainAttestationData,
+    },
+    block::{Block as DomainBlock, BlockBody as DomainBlockBody},
+    primitives::{BitList, H256, VariableList},
+    state::{
+        ChainConfig, Checkpoint as DomainCheckpoint, State, Validator as DomainValidator,
+        ValidatorPubkeyBytes,
+    },
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Root struct for state transition test vectors
+// ============================================================================
+// Root Structures
+// ============================================================================
+
 #[derive(Debug, Clone, Deserialize)]
-pub struct StateTransitionTestVector {
+pub struct ForkChoiceTestVector {
     #[serde(flatten)]
-    pub tests: HashMap<String, StateTransitionTest>,
+    pub tests: HashMap<String, ForkChoiceTest>,
 }
 
-impl StateTransitionTestVector {
-    /// Load a state transition test vector from a JSON file
+impl ForkChoiceTestVector {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
         let test_vector = serde_json::from_str(&content)?;
@@ -20,23 +33,105 @@ impl StateTransitionTestVector {
     }
 }
 
-/// A single state transition test case
 #[derive(Debug, Clone, Deserialize)]
-pub struct StateTransitionTest {
+pub struct ForkChoiceTest {
     #[allow(dead_code)]
     pub network: String,
     #[serde(rename = "leanEnv")]
     #[allow(dead_code)]
     pub lean_env: String,
-    pub pre: TestState,
-    pub blocks: Vec<Block>,
-    pub post: Option<PostState>,
-    #[serde(rename = "_info")]
+    #[serde(rename = "anchorState")]
+    pub anchor_state: TestState,
+    #[serde(rename = "anchorBlock")]
+    pub anchor_block: Block,
+    pub steps: Vec<ForkChoiceStep>,
+    #[serde(rename = "maxSlot")]
     #[allow(dead_code)]
+    pub max_slot: u64,
+    #[serde(rename = "_info")]
     pub info: TestInfo,
 }
 
-/// Pre-state of the beacon chain
+// ============================================================================
+// Step Types
+// ============================================================================
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ForkChoiceStep {
+    pub valid: bool,
+    pub checks: Option<StoreChecks>,
+    #[serde(rename = "stepType")]
+    pub step_type: String,
+    pub block: Option<BlockStepData>,
+    pub time: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlockStepData {
+    pub block: Block,
+    #[serde(rename = "proposerAttestation")]
+    pub proposer_attestation: ProposerAttestation,
+    #[serde(rename = "blockRootLabel")]
+    #[allow(dead_code)]
+    pub block_root_label: Option<String>,
+}
+
+// ============================================================================
+// Check Types
+// ============================================================================
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StoreChecks {
+    // Validated fields
+    #[serde(rename = "headSlot")]
+    pub head_slot: Option<u64>,
+    #[serde(rename = "headRoot")]
+    pub head_root: Option<H256>,
+    #[serde(rename = "attestationChecks")]
+    pub attestation_checks: Option<Vec<AttestationCheck>>,
+    #[serde(rename = "attestationTargetSlot")]
+    pub attestation_target_slot: Option<u64>,
+
+    // Unsupported fields (will error if present in test fixture)
+    pub time: Option<u64>,
+    #[serde(rename = "headRootLabel")]
+    pub head_root_label: Option<String>,
+    #[serde(rename = "latestJustifiedSlot")]
+    pub latest_justified_slot: Option<u64>,
+    #[serde(rename = "latestJustifiedRoot")]
+    pub latest_justified_root: Option<H256>,
+    #[serde(rename = "latestJustifiedRootLabel")]
+    pub latest_justified_root_label: Option<String>,
+    #[serde(rename = "latestFinalizedSlot")]
+    pub latest_finalized_slot: Option<u64>,
+    #[serde(rename = "latestFinalizedRoot")]
+    pub latest_finalized_root: Option<H256>,
+    #[serde(rename = "latestFinalizedRootLabel")]
+    pub latest_finalized_root_label: Option<String>,
+    #[serde(rename = "safeTarget")]
+    pub safe_target: Option<H256>,
+    #[serde(rename = "lexicographicHeadAmong")]
+    pub lexicographic_head_among: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AttestationCheck {
+    pub validator: u64,
+    #[serde(rename = "attestationSlot")]
+    pub attestation_slot: Option<u64>,
+    #[serde(rename = "headSlot")]
+    pub head_slot: Option<u64>,
+    #[serde(rename = "sourceSlot")]
+    pub source_slot: Option<u64>,
+    #[serde(rename = "targetSlot")]
+    pub target_slot: Option<u64>,
+    pub location: String,
+}
+
+// ============================================================================
+// State Types
+// ============================================================================
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TestState {
     pub config: Config,
@@ -81,16 +176,19 @@ impl From<TestState> for State {
     }
 }
 
-/// Configuration for the beacon chain
+// ============================================================================
+// Primitive Types
+// ============================================================================
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(rename = "genesisTime")]
     pub genesis_time: u64,
 }
 
-impl From<Config> for ethlambda_types::state::ChainConfig {
+impl From<Config> for ChainConfig {
     fn from(value: Config) -> Self {
-        ethlambda_types::state::ChainConfig {
+        ChainConfig {
             genesis_time: value.genesis_time,
         }
     }
@@ -102,7 +200,7 @@ pub struct Checkpoint {
     pub slot: u64,
 }
 
-impl From<Checkpoint> for ethlambda_types::state::Checkpoint {
+impl From<Checkpoint> for DomainCheckpoint {
     fn from(value: Checkpoint) -> Self {
         Self {
             root: value.root,
@@ -111,7 +209,6 @@ impl From<Checkpoint> for ethlambda_types::state::Checkpoint {
     }
 }
 
-/// Block header representing the latest block
 #[derive(Debug, Clone, Deserialize)]
 pub struct BlockHeader {
     pub slot: u64,
@@ -137,7 +234,6 @@ impl From<BlockHeader> for ethlambda_types::block::BlockHeader {
     }
 }
 
-/// Validator information
 #[derive(Debug, Clone, Deserialize)]
 pub struct Validator {
     index: u64,
@@ -145,7 +241,7 @@ pub struct Validator {
     pubkey: ValidatorPubkeyBytes,
 }
 
-impl From<Validator> for ethlambda_types::state::Validator {
+impl From<Validator> for DomainValidator {
     fn from(value: Validator) -> Self {
         Self {
             index: value.index,
@@ -154,13 +250,15 @@ impl From<Validator> for ethlambda_types::state::Validator {
     }
 }
 
-/// Generic container for arrays
 #[derive(Debug, Clone, Deserialize)]
 pub struct Container<T> {
     pub data: Vec<T>,
 }
 
-/// A block to be processed
+// ============================================================================
+// Block Types
+// ============================================================================
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Block {
     pub slot: u64,
@@ -173,7 +271,7 @@ pub struct Block {
     pub body: BlockBody,
 }
 
-impl From<Block> for ethlambda_types::block::Block {
+impl From<Block> for DomainBlock {
     fn from(value: Block) -> Self {
         Self {
             slot: value.slot,
@@ -185,13 +283,12 @@ impl From<Block> for ethlambda_types::block::Block {
     }
 }
 
-/// Block body containing attestations and other data
 #[derive(Debug, Clone, Deserialize)]
 pub struct BlockBody {
     pub attestations: Container<AggregatedAttestation>,
 }
 
-impl From<BlockBody> for ethlambda_types::block::BlockBody {
+impl From<BlockBody> for DomainBlockBody {
     fn from(value: BlockBody) -> Self {
         let attestations = value
             .attestations
@@ -212,7 +309,7 @@ pub struct AggregatedAttestation {
     pub data: AttestationData,
 }
 
-impl From<AggregatedAttestation> for ethlambda_types::attestation::AggregatedAttestation {
+impl From<AggregatedAttestation> for DomainAggregatedAttestation {
     fn from(value: AggregatedAttestation) -> Self {
         Self {
             aggregation_bits: value.aggregation_bits.into(),
@@ -226,14 +323,33 @@ pub struct AggregationBits {
     pub data: Vec<bool>,
 }
 
-impl From<AggregationBits> for ethlambda_types::attestation::AggregationBits {
+impl From<AggregationBits> for DomainAggregationBits {
     fn from(value: AggregationBits) -> Self {
-        let mut bits =
-            ethlambda_types::attestation::AggregationBits::with_capacity(value.data.len()).unwrap();
+        let mut bits = DomainAggregationBits::with_capacity(value.data.len()).unwrap();
         for (i, &b) in value.data.iter().enumerate() {
             bits.set(i, b).unwrap();
         }
         bits
+    }
+}
+
+// ============================================================================
+// Attestation Types
+// ============================================================================
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProposerAttestation {
+    #[serde(rename = "validatorId")]
+    pub validator_id: u64,
+    pub data: AttestationData,
+}
+
+impl From<ProposerAttestation> for DomainAttestation {
+    fn from(value: ProposerAttestation) -> Self {
+        Self {
+            validator_id: value.validator_id,
+            data: value.data.into(),
+        }
     }
 }
 
@@ -245,7 +361,7 @@ pub struct AttestationData {
     pub source: Checkpoint,
 }
 
-impl From<AttestationData> for ethlambda_types::attestation::AttestationData {
+impl From<AttestationData> for DomainAttestationData {
     fn from(value: AttestationData) -> Self {
         Self {
             slot: value.slot,
@@ -256,53 +372,10 @@ impl From<AttestationData> for ethlambda_types::attestation::AttestationData {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PostState {
-    #[serde(rename = "configGenesisTime")]
-    pub config_genesis_time: Option<u64>,
-    pub slot: Option<u64>,
+// ============================================================================
+// Metadata
+// ============================================================================
 
-    #[serde(rename = "latestBlockHeaderSlot")]
-    pub latest_block_header_slot: Option<u64>,
-    #[serde(rename = "latestBlockHeaderStateRoot")]
-    pub latest_block_header_state_root: Option<H256>,
-    #[serde(rename = "latestBlockHeaderProposerIndex")]
-    pub latest_block_header_proposer_index: Option<u64>,
-    #[serde(rename = "latestBlockHeaderParentRoot")]
-    pub latest_block_header_parent_root: Option<H256>,
-    #[serde(rename = "latestBlockHeaderBodyRoot")]
-    pub latest_block_header_body_root: Option<H256>,
-
-    #[serde(rename = "latestJustifiedSlot")]
-    pub latest_justified_slot: Option<u64>,
-    #[serde(rename = "latestJustifiedRoot")]
-    pub latest_justified_root: Option<H256>,
-
-    #[serde(rename = "latestFinalizedSlot")]
-    pub latest_finalized_slot: Option<u64>,
-    #[serde(rename = "latestFinalizedRoot")]
-    pub latest_finalized_root: Option<H256>,
-
-    #[serde(rename = "historicalBlockHashesCount")]
-    pub historical_block_hashes_count: Option<u64>,
-    #[serde(rename = "historicalBlockHashes")]
-    pub historical_block_hashes: Option<Container<H256>>,
-
-    #[serde(rename = "justifiedSlots")]
-    pub justified_slots: Option<Container<u64>>,
-
-    #[serde(rename = "justificationsRoots")]
-    pub justifications_roots: Option<Container<H256>>,
-
-    #[serde(rename = "justificationsValidators")]
-    pub justifications_validators: Option<Container<bool>>,
-
-    #[serde(rename = "validatorCount")]
-    pub validator_count: Option<u64>,
-}
-
-/// Test metadata and information
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct TestInfo {
@@ -315,12 +388,15 @@ pub struct TestInfo {
     pub fixture_format: String,
 }
 
+// ============================================================================
 // Helpers
+// ============================================================================
 
 pub fn deser_pubkey_hex<'de, D>(d: D) -> Result<ValidatorPubkeyBytes, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
+    use serde::Deserialize;
     use serde::de::Error;
 
     let value = String::deserialize(d)?;

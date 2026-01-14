@@ -4,10 +4,9 @@ use ethlambda_types::{
     attestation::{Attestation, AttestationData, SignedAttestation, XmssSignature},
     block::{AggregationBits, Block, NaiveAggregatedSignature, SignedBlockWithAttestation},
     primitives::{H256, TreeHash},
-    signature::ValidatorSignature,
     state::{ChainConfig, Checkpoint, State},
 };
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 
 use crate::SECONDS_PER_SLOT;
 
@@ -37,7 +36,7 @@ pub struct Store {
     time: u64,
 
     /// Chain configuration parameters.
-    _config: ChainConfig,
+    config: ChainConfig,
 
     /// Root of the current canonical chain head block.
     ///
@@ -144,7 +143,7 @@ impl Store {
 
         Self {
             time: 0,
-            _config: anchor_state.config.clone(),
+            config: anchor_state.config.clone(),
             head: anchor_block_root,
             safe_target: anchor_block_root,
             latest_justified: anchor_checkpoint,
@@ -169,7 +168,7 @@ impl Store {
 
     pub fn update_head(&mut self) {
         let head = ethlambda_fork_choice::compute_lmd_ghost_head(
-            self.latest_finalized.root,
+            self.latest_justified.root,
             &self.blocks,
             &self.latest_known_attestations,
             0,
@@ -184,9 +183,9 @@ impl Store {
         let min_target_score = (num_validators * 2).div_ceil(3);
 
         let safe_target = ethlambda_fork_choice::compute_lmd_ghost_head(
-            self.latest_finalized.root,
+            self.latest_justified.root,
             &self.blocks,
-            &self.latest_known_attestations,
+            &self.latest_new_attestations,
             min_target_score,
         );
         self.safe_target = safe_target;
@@ -224,6 +223,51 @@ impl Store {
         Ok(())
     }
 
+    pub fn on_tick(&mut self, timestamp: u64, has_proposal: bool) {
+        let time = timestamp - self.config.genesis_time;
+
+        // If we're more than a slot behind, fast-forward to a slot before.
+        // Operations are idempotent, so this should be fine.
+        if time.saturating_sub(self.time) > SECONDS_PER_SLOT {
+            self.time = time - SECONDS_PER_SLOT;
+        }
+
+        while self.time < time {
+            self.time += 1;
+
+            let slot = self.time / SECONDS_PER_SLOT;
+            let interval = self.time % SECONDS_PER_SLOT;
+
+            trace!(%slot, %interval, "processing tick");
+
+            // has_proposal is only signaled for the final tick (matching Python spec behavior)
+            let is_final_tick = self.time == time;
+            let should_signal_proposal = has_proposal && is_final_tick;
+
+            // NOTE: here we assume on_tick never skips intervals
+            match interval {
+                0 => {
+                    // Start of slot - process attestations if proposal exists
+                    if should_signal_proposal {
+                        self.accept_new_attestations();
+                    }
+                }
+                1 => {
+                    // Second interval - no action
+                }
+                2 => {
+                    // Mid-slot - update safe target for validators
+                    self.update_safe_target();
+                }
+                3 => {
+                    // End of slot - accept accumulated attestations
+                    self.accept_new_attestations();
+                }
+                _ => unreachable!("slots only have 4 intervals"),
+            }
+        }
+    }
+
     pub fn on_gossip_attestation(
         &mut self,
         signed_attestation: SignedAttestation,
@@ -245,13 +289,19 @@ impl Store {
         let validator_pubkey = target_state.validators[validator_id as usize]
             .get_pubkey()
             .map_err(|_| StoreError::PubkeyDecodingFailed(validator_id))?;
-        let epoch = target.slot.try_into().expect("slot exceeds u32");
         let message = attestation.data.tree_hash_root();
-        let signature = ValidatorSignature::from_bytes(&signed_attestation.signature)
-            .map_err(|_| StoreError::SignatureDecodingFailed)?;
-        if !validator_pubkey.is_valid(epoch, &message, &signature) {
-            return Err(StoreError::SignatureVerificationFailed);
+        #[cfg(not(feature = "skip-signature-verification"))]
+        {
+            use ethlambda_types::signature::ValidatorSignature;
+            let epoch = target.slot.try_into().expect("slot exceeds u32");
+            let signature = ValidatorSignature::from_bytes(&signed_attestation.signature)
+                .map_err(|_| StoreError::SignatureDecodingFailed)?;
+            if !validator_pubkey.is_valid(epoch, &message, &signature) {
+                return Err(StoreError::SignatureVerificationFailed);
+            }
         }
+        #[cfg(feature = "skip-signature-verification")]
+        let _ = validator_pubkey;
         self.on_attestation(attestation, false)?;
 
         // Store signature for later lookup during block building
@@ -358,7 +408,9 @@ impl Store {
                 })?;
 
         // Validate cryptographic signatures
-        // TODO: change error
+        // TODO: extract signature verification to a pre-checks function
+        // to avoid the need for this
+        #[cfg(not(feature = "skip-signature-verification"))]
         verify_signatures(parent_state, &signed_block)?;
 
         // Execute state transition function to compute post-block state
@@ -445,6 +497,36 @@ impl Store {
         info!(%slot, %block_root, %state_root, "Processed new block");
         Ok(())
     }
+
+    /// Returns the root of the current canonical chain head block.
+    pub fn head(&self) -> H256 {
+        self.head
+    }
+
+    /// Returns a reference to all known blocks.
+    pub fn blocks(&self) -> &HashMap<H256, Block> {
+        &self.blocks
+    }
+
+    /// Returns a reference to the latest known attestations by validator.
+    pub fn latest_known_attestations(&self) -> &HashMap<u64, AttestationData> {
+        &self.latest_known_attestations
+    }
+
+    /// Returns a reference to the latest new (pending) attestations by validator.
+    pub fn latest_new_attestations(&self) -> &HashMap<u64, AttestationData> {
+        &self.latest_new_attestations
+    }
+
+    /// Returns a reference to the latest justified checkpoint.
+    pub fn latest_justified(&self) -> &Checkpoint {
+        &self.latest_justified
+    }
+
+    /// Returns a reference to the latest finalized checkpoint.
+    pub fn latest_finalized(&self) -> &Checkpoint {
+        &self.latest_finalized
+    }
 }
 
 /// Errors that can occur during Store operations.
@@ -509,10 +591,13 @@ fn aggregation_bits_to_validator_indices(bits: &AggregationBits) -> Vec<u64> {
         .collect()
 }
 
+#[cfg(not(feature = "skip-signature-verification"))]
 fn verify_signatures(
     state: &State,
     signed_block: &SignedBlockWithAttestation,
 ) -> Result<(), StoreError> {
+    use ethlambda_types::signature::ValidatorSignature;
+
     let block = &signed_block.message.block;
     let attestations = &block.body.attestations;
     let attestation_signatures = &signed_block.signature.attestation_signatures;

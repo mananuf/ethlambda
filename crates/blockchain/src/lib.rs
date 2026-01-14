@@ -7,26 +7,22 @@ use spawned_concurrency::tasks::{
     CallResponse, CastResponse, GenServer, GenServerHandle, send_after,
 };
 use store::Store;
-use tracing::{error, trace, warn};
+use tracing::{error, warn};
 
-mod store;
+pub mod store;
 
 pub struct BlockChain {
     handle: GenServerHandle<BlockChainServer>,
 }
 
 /// Seconds in a slot. Each slot has 4 intervals of 1 second each.
-const SECONDS_PER_SLOT: u64 = 4;
+pub const SECONDS_PER_SLOT: u64 = 4;
 
 impl BlockChain {
     pub fn spawn(genesis_state: State) -> BlockChain {
         let genesis_time = genesis_state.config.genesis_time;
         let store = Store::from_genesis(genesis_state);
-        let handle = BlockChainServer {
-            genesis_time,
-            store,
-        }
-        .start();
+        let handle = BlockChainServer { store }.start();
         let time_until_genesis = (SystemTime::UNIX_EPOCH + Duration::from_secs(genesis_time))
             .duration_since(SystemTime::now())
             .unwrap_or_default();
@@ -58,41 +54,15 @@ impl BlockChain {
 }
 
 struct BlockChainServer {
-    genesis_time: u64,
     store: Store,
 }
 
 impl BlockChainServer {
     fn on_tick(&mut self, timestamp: u64) {
-        let time = timestamp - self.genesis_time;
         // TODO: check if we are proposing
         let has_proposal = false;
 
-        let slot = time / SECONDS_PER_SLOT;
-        let interval = time % SECONDS_PER_SLOT;
-        trace!(%slot, %interval, "processing tick");
-
-        // NOTE: here we assume on_tick never skips intervals
-        match interval {
-            0 => {
-                // Start of slot - process attestations if proposal exists
-                if has_proposal {
-                    self.store.accept_new_attestations();
-                }
-            }
-            1 => {
-                // Second interval - no action
-            }
-            2 => {
-                // Mid-slot - update safe target for validators
-                self.store.update_safe_target();
-            }
-            3 => {
-                // End of slot - accept accumulated attestations
-                self.store.accept_new_attestations();
-            }
-            _ => unreachable!("slots only have 4 intervals"),
-        }
+        self.store.on_tick(timestamp, has_proposal);
     }
 
     fn on_block(&mut self, signed_block: SignedBlockWithAttestation) {
