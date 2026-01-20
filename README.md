@@ -39,7 +39,7 @@ In contrast, our philosophy is rooted in simplicity. We strive to write minimal 
 
 Read more about our engineering philosophy [in this post of our blog](https://blog.lambdaclass.com/lambdas-engineering-philosophy/).
 
-## Design Principles
+## Design principles
 
 - Ensure effortless setup and execution across all target environments.
 - Be vertically integrated. Have the minimal amount of dependencies.
@@ -59,7 +59,7 @@ The following links, repos, companies and projects have been important in the de
 
 If we forgot to include anyone, please file an issue so we can add you. We always strive to reference the inspirations and code we use, but as an organization with multiple people, mistakes can happen, and someone might forget to include a reference.
 
-## Current Status
+## Current status
 
 The client implements the core features of a Lean Ethereum consensus client:
 
