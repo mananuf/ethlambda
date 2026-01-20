@@ -25,9 +25,6 @@ impl StateTransitionTestVector {
 pub struct StateTransitionTest {
     #[allow(dead_code)]
     pub network: String,
-    #[serde(rename = "leanEnv")]
-    #[allow(dead_code)]
-    pub lean_env: String,
     pub pre: TestState,
     pub blocks: Vec<Block>,
     pub post: Option<PostState>,
@@ -188,53 +185,33 @@ impl From<Block> for ethlambda_types::block::Block {
 /// Block body containing attestations and other data
 #[derive(Debug, Clone, Deserialize)]
 pub struct BlockBody {
-    pub attestations: Container<AggregatedAttestation>,
+    pub attestations: Container<Attestation>,
 }
 
 impl From<BlockBody> for ethlambda_types::block::BlockBody {
     fn from(value: BlockBody) -> Self {
-        let attestations = value
+        let attestations: Vec<ethlambda_types::attestation::Attestation> = value
             .attestations
             .data
             .into_iter()
-            .map(Into::into)
+            .map(|att| ethlambda_types::attestation::Attestation {
+                validator_id: att.validator_id,
+                data: att.data.into(),
+            })
             .collect();
+
         Self {
             attestations: VariableList::new(attestations).expect("too many attestations"),
         }
     }
 }
 
+/// Individual attestation from test fixtures (unaggregated format)
 #[derive(Debug, Clone, Deserialize)]
-pub struct AggregatedAttestation {
-    #[serde(rename = "aggregationBits")]
-    pub aggregation_bits: AggregationBits,
+pub struct Attestation {
+    #[serde(rename = "validatorId")]
+    pub validator_id: u64,
     pub data: AttestationData,
-}
-
-impl From<AggregatedAttestation> for ethlambda_types::attestation::AggregatedAttestation {
-    fn from(value: AggregatedAttestation) -> Self {
-        Self {
-            aggregation_bits: value.aggregation_bits.into(),
-            data: value.data.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct AggregationBits {
-    pub data: Vec<bool>,
-}
-
-impl From<AggregationBits> for ethlambda_types::attestation::AggregationBits {
-    fn from(value: AggregationBits) -> Self {
-        let mut bits =
-            ethlambda_types::attestation::AggregationBits::with_capacity(value.data.len()).unwrap();
-        for (i, &b) in value.data.iter().enumerate() {
-            bits.set(i, b).unwrap();
-        }
-        bits
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
