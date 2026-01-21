@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ethlambda_types::{
-    block::{Attestations, Block, BlockHeader},
+    block::{AggregatedAttestations, Block, BlockHeader},
     primitives::{H256, TreeHash},
     state::{Checkpoint, JustificationValidators, State},
 };
@@ -134,37 +134,15 @@ fn process_block_header(state: &mut State, block: &Block) -> Result<(), Error> {
 
     // Extend justified_slots to cover slots up to (block.slot - 1)
     //
+    // The storage is relative to the finalized boundary.
     // The current block's slot is not materialized until processing completes,
-    // so we only extend up to the last materialized slot (parent's slot).
-    let parent_slot = parent_header.slot;
+    // so we only extend up to the last materialized slot.
+    let last_materialized_slot = block.slot - 1;
     justified_slots_ops::extend_to_slot(
         &mut state.justified_slots,
         state.latest_finalized.slot,
-        parent_slot,
+        last_materialized_slot,
     );
-
-    // Mark the genesis/parent slot as justified when processing the first block.
-    // This matches the Python spec's behavior which explicitly stores this bit.
-    if is_genesis_parent {
-        justified_slots_ops::set_justified(
-            &mut state.justified_slots,
-            state.latest_finalized.slot,
-            parent_slot,
-        );
-    }
-
-    // Extend for any empty slots between parent and this block
-    for _slot in (parent_slot + 1)..block.slot {
-        // Empty slots are not justified, but we need to extend the bitlist
-        // to maintain the correct length. The extend_to_slot function handles this.
-    }
-    if block.slot > parent_slot + 1 {
-        justified_slots_ops::extend_to_slot(
-            &mut state.justified_slots,
-            state.latest_finalized.slot,
-            block.slot - 1,
-        );
-    }
 
     let new_header = BlockHeader {
         slot: block.slot,
@@ -199,7 +177,10 @@ pub fn is_proposer(validator_index: u64, slot: u64, num_validators: u64) -> bool
 
 /// Apply attestations and update justification/finalization
 /// according to the Lean Consensus 3SF-mini rules.
-fn process_attestations(state: &mut State, attestations: &Attestations) -> Result<(), Error> {
+fn process_attestations(
+    state: &mut State,
+    attestations: &AggregatedAttestations,
+) -> Result<(), Error> {
     let validator_count = state.validators.len();
     let mut justifications: HashMap<H256, Vec<bool>> = state
         .justifications_roots
@@ -219,17 +200,21 @@ fn process_attestations(state: &mut State, attestations: &Attestations) -> Resul
     // For is_justifiable_after checks (must use original value, not updated during iteration)
     let original_finalized_slot = state.latest_finalized.slot;
 
-    // Build root_to_slots mapping for justifications pruning.
-    // A root may appear at multiple slots (missed slots produce duplicate zero hashes).
-    let mut root_to_slots: HashMap<H256, Vec<u64>> = HashMap::new();
+    // Map roots to their latest slot for pruning.
+    //
+    // Votes for zero hash are ignored, so we only need the most recent slot
+    // where a root appears to decide whether it is still unfinalized.
+    let mut root_to_slot: HashMap<H256, u64> = HashMap::new();
     for slot in (state.latest_finalized.slot + 1)..state.historical_block_hashes.len() as u64 {
         if let Some(root) = state.historical_block_hashes.get(slot as usize) {
-            root_to_slots.entry(*root).or_default().push(slot);
+            root_to_slot
+                .entry(*root)
+                .and_modify(|x| *x = (*x).max(slot))
+                .or_insert(slot);
         }
     }
 
     for attestation in attestations {
-        let validator_id = attestation.validator_id;
         let attestation_data = &attestation.data;
         let source = attestation_data.source;
         let target = attestation_data.target;
@@ -253,6 +238,11 @@ fn process_attestations(state: &mut State, attestations: &Attestations) -> Resul
             continue;
         }
 
+        // Ignore votes that reference zero-hash slots.
+        if source.root == H256::ZERO || target.root == H256::ZERO {
+            continue;
+        }
+
         // Ensure the vote refers to blocks that actually exist on our chain
         if !checkpoint_exists(state, source) || !checkpoint_exists(state, target) {
             continue;
@@ -268,13 +258,18 @@ fn process_attestations(state: &mut State, attestations: &Attestations) -> Resul
             continue;
         }
 
-        // Record the vote for this individual attestation
+        // Record the vote
         let votes = justifications
             .entry(target.root)
             .or_insert_with(|| std::iter::repeat_n(false, validator_count).collect());
-        // Mark that this validator has voted for the target
-        if (validator_id as usize) < validator_count {
-            votes[validator_id as usize] = true;
+        // Mark that each validator in this aggregation has voted for the target.
+        for (validator_id, _) in attestation
+            .aggregation_bits
+            .iter()
+            .enumerate()
+            .filter(|(_, voted)| *voted)
+        {
+            votes[validator_id] = true;
         }
 
         // Check whether the vote count crosses the supermajority threshold
@@ -304,9 +299,8 @@ fn process_attestations(state: &mut State, attestations: &Attestations) -> Resul
 
                 // Prune justifications whose roots only appear at now-finalized slots
                 justifications.retain(|root, _| {
-                    root_to_slots.get(root).is_some_and(|slots| {
-                        slots.iter().any(|&slot| slot > state.latest_finalized.slot)
-                    })
+                    let slot = root_to_slot[root];
+                    slot > state.latest_finalized.slot
                 });
             }
         }

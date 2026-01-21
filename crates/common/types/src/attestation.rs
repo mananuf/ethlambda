@@ -1,7 +1,10 @@
 use ssz_derive::{Decode, Encode};
 use tree_hash_derive::TreeHash;
 
-use crate::{signature::SignatureSize, state::Checkpoint};
+use crate::{
+    signature::SignatureSize,
+    state::{Checkpoint, ValidatorRegistryLimit},
+};
 
 /// Validator specific attestation wrapping shared attestation data.
 #[derive(Debug, Clone, Encode, Decode, TreeHash)]
@@ -41,3 +44,22 @@ pub struct SignedAttestation {
 }
 
 pub type XmssSignature = ssz_types::FixedVector<u8, SignatureSize>;
+
+/// Aggregated attestation consisting of participation bits and message.
+#[derive(Debug, Clone, Encode, Decode, TreeHash)]
+pub struct AggregatedAttestation {
+    /// Bitfield indicating which validators participated in the aggregation.
+    pub aggregation_bits: AggregationBits,
+
+    /// Combined attestation data similar to the beacon chain format.
+    ///
+    /// Multiple validator attestations are aggregated here without the complexity of
+    /// committee assignments.
+    pub data: AttestationData,
+}
+
+/// Bitlist representing validator participation in an attestation or signature.
+///
+/// A general-purpose bitfield for tracking which validators have participated
+/// in some collective action (attestation, signature aggregation, etc.).
+pub type AggregationBits = ssz_types::BitList<ValidatorRegistryLimit>;

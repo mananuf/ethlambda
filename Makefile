@@ -13,14 +13,14 @@ test: ## 🧪 Run all tests, then forkchoice tests with skip-signature-verificat
 docker-build: ## 🐳 Build the Docker image
 	docker build -t ghcr.io/lambdaclass/ethlambda:local .
 
-LEAN_SPEC_COMMIT_HASH:=050fa4a18881d54d7dc07601fe59e34eb20b9630
+LEAN_SPEC_COMMIT_HASH:=fbbacbea4545be870e25e3c00a90fc69e019c5bb
 
 leanSpec:
 	git clone https://github.com/leanEthereum/leanSpec.git --single-branch
 	cd leanSpec && git checkout $(LEAN_SPEC_COMMIT_HASH)
 
 leanSpec/fixtures: leanSpec
-	cd leanSpec && uv run fill --fork devnet -o fixtures #--scheme=prod
+	cd leanSpec && uv run fill --fork devnet --scheme=prod -o fixtures
 
 # lean-quickstart:
 # 	git clone https://github.com/blockblaz/lean-quickstart.git --depth 1 --single-branch

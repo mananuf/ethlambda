@@ -152,16 +152,14 @@ impl BlockChainServer {
                 continue;
             }
 
-            // Hash the attestation data for signing
-            let attestation = Attestation {
-                data: attestation_data.clone(),
-                validator_id,
-            };
-
             // Sign the attestation
-            let Ok(signature) = self.key_manager.sign_attestation(&attestation).inspect_err(
-                |err| error!(%slot, %validator_id, %err, "Failed to sign attestation"),
-            ) else {
+            let Ok(signature) = self
+                .key_manager
+                .sign_attestation(validator_id, &attestation_data)
+                .inspect_err(
+                    |err| error!(%slot, %validator_id, %err, "Failed to sign attestation"),
+                )
+            else {
                 continue;
             };
 
@@ -216,7 +214,7 @@ impl BlockChainServer {
         // Sign the proposer's attestation
         let Ok(proposer_signature) = self
             .key_manager
-            .sign_attestation(&proposer_attestation)
+            .sign_attestation(validator_id, &proposer_attestation.data)
             .inspect_err(
                 |err| error!(%slot, %validator_id, %err, "Failed to sign proposer attestation"),
             )
@@ -224,21 +222,21 @@ impl BlockChainServer {
             return;
         };
 
-        // Assemble flat signature list: [attestation_sig_0, ..., attestation_sig_n, proposer_sig]
-        let mut signatures = attestation_signatures;
-        signatures.push(proposer_signature);
-        let block_signatures: BlockSignatures =
-            signatures.try_into().expect("signatures within limit");
-
         // Assemble SignedBlockWithAttestation
         let signed_block = SignedBlockWithAttestation {
             message: BlockWithAttestation {
                 block,
                 proposer_attestation,
             },
-            signature: block_signatures,
+            signature: BlockSignatures {
+                proposer_signature,
+                attestation_signatures: attestation_signatures
+                    .try_into()
+                    .expect("attestation signatures within limit"),
+            },
         };
 
+        // Process the block locally before publishing
         self.on_block(signed_block.clone());
 
         // Publish to gossip network
