@@ -8,7 +8,6 @@ use std::{
 
 use clap::Parser;
 use ethlambda_p2p::{Bootnode, parse_enrs, start_p2p};
-use ethlambda_rpc::metrics::start_prometheus_metrics_api;
 use ethlambda_types::primitives::H256;
 use ethlambda_types::{
     genesis::Genesis,
@@ -20,6 +19,7 @@ use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, Layer, Registry, layer::SubscriberExt};
 
 use ethlambda_blockchain::BlockChain;
+use ethlambda_storage::Store;
 
 const ASCII_ART: &str = r#"
       _   _     _                 _         _
@@ -91,9 +91,10 @@ async fn main() {
         read_validator_keys(&validators_path, &validator_keys_dir, &options.node_id);
 
     let genesis_state = State::from_genesis(&genesis, validators);
+    let store = Store::from_genesis(genesis_state);
 
     let (p2p_tx, p2p_rx) = tokio::sync::mpsc::unbounded_channel();
-    let blockchain = BlockChain::spawn(genesis_state, p2p_tx, validator_keys);
+    let blockchain = BlockChain::spawn(store.clone(), p2p_tx, validator_keys);
 
     let p2p_handle = tokio::spawn(start_p2p(
         node_p2p_key,
@@ -103,7 +104,9 @@ async fn main() {
         p2p_rx,
     ));
 
-    start_prometheus_metrics_api(metrics_socket).await.unwrap();
+    ethlambda_rpc::start_rpc_server(metrics_socket, store)
+        .await
+        .unwrap();
 
     info!("Node initialized");
 
